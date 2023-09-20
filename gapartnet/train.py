@@ -3,6 +3,10 @@ from lightning.pytorch.cli import LightningCLI
 import lightning.pytorch as pl
 import torch
 import wandb
+
+import torch.multiprocessing
+torch.multiprocessing.set_sharing_strategy('file_system')
+
 torch.set_float32_matmul_precision('medium')
 def log_name(config):
     # model
