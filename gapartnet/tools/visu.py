@@ -531,7 +531,7 @@ def main():
 
             points_input, trans, semantic_label, instance_label, npcs_map = model.process_gapartnetfile(name, split)
             bboxes, sem_preds, npcs_maps, proposal_indices, proposal_offsets = model.inference(points_input)
-
+            print("\n\n\nbbox",bboxes)
             # visualize results in the image
 
             # try:

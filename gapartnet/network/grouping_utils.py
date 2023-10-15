@@ -115,9 +115,10 @@ def cluster_proposals(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     device = pt_xyz.device
     index_dtype = batch_indices.dtype
-
+#clustered_indices.shape    torch.Size([152516, 300])
+#max_num_points_per_query   300
     clustered_indices, num_points_per_query = ball_query(
-        pt_xyz,
+        pt_xyz,                           #pt_xyz.shape torch.Size([152516, 3])
         pt_xyz,
         batch_indices,
         batch_offsets,

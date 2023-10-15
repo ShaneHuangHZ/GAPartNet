@@ -39,14 +39,15 @@ model:
       RAW_IMG_ROOT: "data/image_kuafu"
       GAPARTNET_DATA_ROOT: "data/GAPartNet_All"
       SAVE_ROOT: "output/GAPartNet_result"
-      save_option: ["raw", "pc", "sem_pred", "sem_gt", "ins_pred", "ins_gt", "npcs_pred", "npcs_gt", "bbox_gt", "bbox_gt_pure", "bbox_pred", "bbox_pred_pure"]
+      # save_option: ["raw", "pc", "sem_pred", "sem_gt", "ins_pred", "ins_gt", "npcs_pred", "npcs_gt", "bbox_gt", "bbox_gt_pure", "bbox_pred", "bbox_pred_pure"]
+      save_option: ["pc", "sem_pred", "ins_pred","npcs_pred","bbox_pred", "bbox_pred_pure"]
 
 
 data:
   class_path: dataset.gapartnet.GAPartNetInst
   init_args:
     root_dir: data/GAPartNet_All
-    max_points: 20000
+    max_points: 20000   #20000->90000
     voxel_size: [0.01,0.01,0.01]
     train_batch_size: 64
     val_batch_size: 32

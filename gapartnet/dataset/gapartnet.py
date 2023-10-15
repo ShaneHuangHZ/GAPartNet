@@ -66,6 +66,7 @@ class GAPartNetDataset(Dataset):
     def __getitem__(self, idx):
         path = self.pc_paths[idx]
         file = load_data(path, no_label = self.no_label)
+        # print("file\n\n\n\n\n",file)
         if not bool((file.instance_labels != -100).any()):
             import ipdb; ipdb.set_trace()
         file = downsample(file, max_points=self.max_points)
@@ -208,14 +209,21 @@ def apply_voxelization(
 def load_data(file_path: str, no_label: bool = False):
     if not no_label:
         pc_data = torch.load(file_path)
+        # print("file",file_path)
     else:
         # testing data type, e.g. real world point cloud without GT semantic label.
         raise NotImplementedError
 
     pc_id = file_path.split("/")[-1].split(".")[0]
     object_cat = OBJECT_NAME2ID[pc_id.split("_")[0]]
+    # print("pcdata",pc_data)
+    # print("file",file_path)
+    # print("pcdata1",pc_data[1].shape)
+    # print("pcdata2",pc_data[2])
+    # print("pcdata3",pc_data[3].shape)
+    # print("pcdata4",pc_data[5].shape)
 
-
+    
     return PointCloud(
         pc_id=pc_id,
         obj_cat=object_cat,
@@ -223,9 +231,11 @@ def load_data(file_path: str, no_label: bool = False):
             [pc_data[0], pc_data[1]],
             axis=-1, dtype=np.float32,
         ),
-        sem_labels=pc_data[2].astype(np.int64),
+        sem_labels=pc_data[2].astype(np.int64),  #sem_labels 0-9, 0 represent no-sem
         instance_labels=pc_data[3].astype(np.int32),
         gt_npcs=pc_data[4].astype(np.float32),
+        gt_sym=pc_data[5].astype(np.float32)
+        # gt_npcs_sym=pc_data[5].astype(np.float32)
     )
 
 def from_folder(
@@ -333,6 +343,7 @@ class GAPartNetInst(LightningDataModule):
         self.few_shot_num = few_shot_num
 
     def setup(self, stage: Optional[str] = None):
+        print("set up::hjs")
         if stage in (None, "fit", "validate"):
             if not self.train_with_all:
                 self.train_data_files = GAPartNetDataset(
@@ -412,6 +423,7 @@ class GAPartNetInst(LightningDataModule):
             )
 
         if stage in (None, "test"):
+            print("test")
             self.val_data_files = GAPartNetDataset(
                 Path(self.root_dir) / "val" / "pth",
                 shuffle=True,
@@ -499,6 +511,7 @@ class GAPartNetInst(LightningDataModule):
         ]
 
     def test_dataloader(self):
+        print("test_dataloader")
         return [
             DataLoader(
             self.val_data_files,

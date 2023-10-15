@@ -32,7 +32,10 @@ class PointCloudBatch:
     
     #npcs
     gt_npcs: Optional[Union[torch.Tensor, np.ndarray]] = None
-    
+
+    #symmetric
+    gt_sym: Optional[Union[torch.Tensor, np.ndarray]] = None
+
 @dataclass
 class PointCloud:
     pc_id: str
@@ -46,9 +49,11 @@ class PointCloud:
 
     gt_npcs: Optional[Union[torch.Tensor, np.ndarray]] = None
 
+    gt_sym: Optional[Union[torch.Tensor, np.ndarray]] = None
+
     # instance number
     num_instances: Optional[int] = None 
-    
+
     # for points in an instance: 0-3: mean_xyz; 3-6: max_xyz; 6-9: min_xyz
     instance_regions: Optional[Union[torch.Tensor, np.ndarray]] = None
     
@@ -110,6 +115,15 @@ class PointCloud:
             gt_npcs = torch.cat([pc.gt_npcs for pc in point_clouds], dim=0)
         else:
             gt_npcs = None
+
+        if point_clouds[0].gt_sym is not None:
+            gt_sym = torch.cat([pc.gt_sym for pc in point_clouds], dim=0)
+        else:
+            gt_sym = None
+        # if point_clouds[0].target_sym is not None:
+        #     target_sym = torch.cat([pc.target_sym for pc in point_clouds], dim=0)
+        # else:
+        #     target_sym = None
 
         if point_clouds[0].num_instances is not None:
             num_instances = [pc.num_instances for pc in point_clouds]
@@ -186,6 +200,7 @@ class PointCloud:
             instance_labels = instance_labels,
             #npcs
             gt_npcs=gt_npcs,
+            gt_sym=gt_sym
         )
     
 

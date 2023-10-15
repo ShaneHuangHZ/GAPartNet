@@ -87,8 +87,10 @@ class GAPartNet(lp.LightningModule):
         # backbone
         if self.backbone_type == "SparseUNet":
             channels = self.backbone_cfg["channels"]
-            block_repeat = self.backbone_cfg["block_repeat"]
+            #channels [16, 32, 48, 64, 80, 96, 112]
+            block_repeat = self.backbone_cfg["block_repeat"] #2
             fea_dim = channels[0]
+            #in_channels   6
             self.backbone = SparseUNet.build(in_channels, channels, block_repeat, norm_fn)
         elif self.backbone_type == "PointNet":
             from .backbone import PointNetBackbone
@@ -101,7 +103,8 @@ class GAPartNet(lp.LightningModule):
         else:
             raise NotImplementedError(f"backbone type {self.backbone_type} not implemented")
         # semantic segmentation head
-        self.sem_seg_head = nn.Linear(fea_dim, self.num_part_classes)
+        self.sem_seg_head = nn.Linear(fea_dim, self.num_part_classes) 
+        #self.num_part_classes  10
         # offset prediction
         self.offset_head = nn.Sequential(
             nn.Linear(fea_dim, fea_dim),
@@ -109,7 +112,12 @@ class GAPartNet(lp.LightningModule):
             nn.ReLU(inplace=True),
             nn.Linear(fea_dim, 3),
         )
-        
+        self.symmetric_head = nn.Sequential(
+            nn.Linear(fea_dim, fea_dim),
+            norm_fn(fea_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(fea_dim, 3),
+        )
         self.score_unet = SparseUNet.build(
             fea_dim, channels[:2], block_repeat, norm_fn, without_stem=True
         )
@@ -124,6 +132,12 @@ class GAPartNet(lp.LightningModule):
         (
             symmetry_matrix_1, symmetry_matrix_2, symmetry_matrix_3
         ) = get_symmetry_matrix()
+
+        self.sym_npcs_unet = SparseUNet.build(
+            fea_dim, channels[:2], block_repeat, norm_fn, without_stem=True
+        )
+        self.sym_npcs_head = nn.Linear(fea_dim, 3 * (self.num_part_classes - 1))
+
         self.symmetry_matrix_1 = symmetry_matrix_1
         self.symmetry_matrix_2 = symmetry_matrix_2
         self.symmetry_matrix_3 = symmetry_matrix_3
@@ -146,6 +160,7 @@ class GAPartNet(lp.LightningModule):
         self,
         pc_batch: PointCloudBatch,
     ):
+        # print("pc_batch",pc_batch.type)
         if self.backbone_type == "SparseUNet":
             voxel_tensor = pc_batch.voxel_tensor
             pc_voxel_id = pc_batch.pc_voxel_id
@@ -157,6 +172,17 @@ class GAPartNet(lp.LightningModule):
             
         return pc_feature
     
+    def forward_symmetric(
+        self,
+        pc_feature: torch.Tensor,
+    ) -> torch.Tensor:
+        sem_logits = self.sem_seg_head(pc_feature)
+
+        return sem_logits
+
+
+
+
     def forward_sem_seg(
         self,
         pc_feature: torch.Tensor,
@@ -192,6 +218,35 @@ class GAPartNet(lp.LightningModule):
             )
 
         return loss
+    
+    def forward_symmetric(
+        self,
+        pc_feature: torch.Tensor,
+    ) -> torch.Tensor:
+        sym = self.symmetric_head(pc_feature)
+
+        return sym    
+
+
+
+
+        loss = tc.abs(target - pred)
+        mean_loss = tc.mean(loss)
+
+        return mean_loss
+    
+    def loss_symmetric(self, pred, target):
+        '''
+        :param pred: (640000,3)
+        :param target: (640000,3)
+        :return:
+        '''
+        loss = torch.abs(target - pred)
+        mean_loss = torch.mean(loss)
+        # chamfer_distance
+        # emd_distancs() npts constance. 
+        return mean_loss
+
 
     def forward_offset(
         self,
@@ -234,8 +289,9 @@ class GAPartNet(lp.LightningModule):
         offset_preds: torch.Tensor,
         instance_labels: Optional[torch.Tensor],
     ):
+        # print("instance_labels",instance_labels.shape)
         device = self.device
-        
+        # print("sem_preds",sem_preds.shape)
         if instance_labels is not None:
             valid_mask = (sem_preds > 0) & (instance_labels >= 0)
         else:
@@ -287,8 +343,11 @@ class GAPartNet(lp.LightningModule):
             num_points_per_proposal >= self.min_num_points_per_proposal
         )
         # proposal to point
+        #valid_proposal_mask.shape   torch.Size([528])
+        #proposal_indices            torch.Size([305032])
         valid_point_mask = valid_proposal_mask[proposal_indices]
-
+        #valid_proposal_mask[proposal_indices].shape  torch.Size([305032])
+        #sorted_indices              torch.Size([305032])
         sorted_indices = sorted_indices[valid_point_mask]
         if sorted_indices.shape[0] == 0:
             return None, None, None
@@ -355,13 +414,14 @@ class GAPartNet(lp.LightningModule):
         proposal_offsets_begin = proposal_offsets[:-1] # type: ignore
         proposal_offsets_end = proposal_offsets[1:] # type: ignore
 
-        score_features = self.score_unet(voxel_tensor)
-        score_features = score_features.features[pc_voxel_id]
-        pooled_score_features, _ = segmented_maxpool(
+        score_features = self.score_unet(voxel_tensor)  #voxel_tensor.features.shape   torch.Size([56294, 16])      score_features  SparseConvTensor[shape=torch.Size([56294, 16])]
+        score_features = score_features.features[pc_voxel_id]  #pc_voxel_id.shape      torch.Size([304671])         score_features.shape   torch.Size([304671, 16])
+        pooled_score_features, _ = segmented_maxpool(          #pooled_score_features.shape   torch.Size([308, 16])   total 308proposals
             score_features, proposal_offsets_begin, proposal_offsets_end
         )
+        #pooled_score_features   torch.Size([308, 16])
         score_logits = self.score_head(pooled_score_features)
-
+        #score_logits.shape      torch.Size([308, 9])
         return score_logits
 
     def loss_proposal_score(
@@ -384,15 +444,58 @@ class GAPartNet(lp.LightningModule):
 
         return F.binary_cross_entropy_with_logits(score_logits, gt_scores)
 
+    def forward_proposal_npcs_sym(
+        self,
+        voxel_tensor: spconv.SparseConvTensor,
+        pc_voxel_id: torch.Tensor,
+    ) -> torch.Tensor:
+        npcs_sym_features = self.sym_npcs_unet(voxel_tensor)          #voxel_tensor.features.shape    torch.Size([56294, 16])
+        sym_npcs_logits = self.sym_npcs_head(npcs_sym_features.features)  #npcs_features.features.shape   torch.Size([56294, 16])  npcs_logits.shape torch.Size([56294, 3])
+        sym_npcs_logits = sym_npcs_logits[pc_voxel_id]                #npcs_logits                    torch.Size([304671, 3])   (xyz*num_part)
+
+        return sym_npcs_logits
+
+    def loss_proposal_sym(
+        self,
+        npcs_logits: torch.Tensor,
+        gt_npcs: torch.Tensor,
+        proposals: Instances,
+    ) -> torch.Tensor:
+        sem_preds, sem_labels = proposals.sem_preds, proposals.sem_labels
+        proposal_indices = proposals.proposal_indices     
+        valid_mask = (sem_preds == sem_labels) & (gt_npcs != 0).any(dim=-1)
+
+        npcs_logits = npcs_logits[valid_mask]    #torch.Size([304671, 27])->torch.Size([304003, 27])
+        gt_npcs = gt_npcs[valid_mask]            # gt_npcs  torch.Size([304003, 3])
+        sem_preds = sem_preds[valid_mask].long()
+        sem_labels = sem_labels[valid_mask]
+        proposal_indices = proposal_indices[valid_mask]
+
+        npcs_logits = rearrange(npcs_logits, "n (k c) -> n k c", c=3)   #torch.Size([304003, 27])-> torch.Size([304003, 9, 3])
+        npcs_logits = npcs_logits.gather(                               #torch.Size([304003, 3])
+            1, index=repeat(sem_preds - 1, "n -> n one c", one=1, c=3)
+        ).squeeze(1)
+
+        # proposals.npcs_preds = npcs_logits.detach()
+        # proposals.gt_npcs = gt_npcs
+        # proposals.npcs_valid_mask = valid_mask
+
+        loss_npcs =torch.abs(npcs_logits - gt_npcs)         
+        # loss = torch.abs(target - pred)
+        mean_loss = torch.mean(loss_npcs)
+        return mean_loss
+
+
+
     def forward_proposal_npcs(
         self,
         voxel_tensor: spconv.SparseConvTensor,
         pc_voxel_id: torch.Tensor,
     ) -> torch.Tensor:
-        npcs_features = self.npcs_unet(voxel_tensor)
-        npcs_logits = self.npcs_head(npcs_features.features)
-        npcs_logits = npcs_logits[pc_voxel_id]
-
+        npcs_features = self.npcs_unet(voxel_tensor)          #voxel_tensor.features.shape    torch.Size([56294, 16])
+        npcs_logits = self.npcs_head(npcs_features.features)  #npcs_features.features.shape   torch.Size([56294, 16])  npcs_logits.shape torch.Size([56294, 27])
+        npcs_logits = npcs_logits[pc_voxel_id]                #npcs_logits                    torch.Size([304671, 27])   (xyz*num_part)
+ 
         return npcs_logits
 
     def loss_proposal_npcs(
@@ -402,17 +505,17 @@ class GAPartNet(lp.LightningModule):
         proposals: Instances,
     ) -> torch.Tensor:
         sem_preds, sem_labels = proposals.sem_preds, proposals.sem_labels
-        proposal_indices = proposals.proposal_indices
+        proposal_indices = proposals.proposal_indices     
         valid_mask = (sem_preds == sem_labels) & (gt_npcs != 0).any(dim=-1)
 
-        npcs_logits = npcs_logits[valid_mask]
-        gt_npcs = gt_npcs[valid_mask]
+        npcs_logits = npcs_logits[valid_mask]    #torch.Size([304671, 27])->torch.Size([304003, 27])
+        gt_npcs = gt_npcs[valid_mask]            # gt_npcs  torch.Size([304003, 3])
         sem_preds = sem_preds[valid_mask].long()
         sem_labels = sem_labels[valid_mask]
         proposal_indices = proposal_indices[valid_mask]
 
-        npcs_logits = rearrange(npcs_logits, "n (k c) -> n k c", c=3)
-        npcs_logits = npcs_logits.gather(
+        npcs_logits = rearrange(npcs_logits, "n (k c) -> n k c", c=3)   #torch.Size([304003, 27])-> torch.Size([304003, 9, 3])
+        npcs_logits = npcs_logits.gather(                               #torch.Size([304003, 3])
             1, index=repeat(sem_preds - 1, "n -> n one c", one=1, c=3)
         ).squeeze(1)
 
@@ -472,23 +575,27 @@ class GAPartNet(lp.LightningModule):
         batch_size = len(point_clouds)
         
         # data batch parsing
+        #point_clouds[0] is PointCloud type,containing pc_id,obj_cat and so on
         data_batch = PointCloud.collate(point_clouds)
         points = data_batch.points
         sem_labels = data_batch.sem_labels
         pc_ids = data_batch.pc_ids
         instance_regions = data_batch.instance_regions
-        instance_labels = data_batch.instance_labels
-        batch_indices = data_batch.batch_indices
-        instance_sem_labels = data_batch.instance_sem_labels
-        num_points_per_instance = data_batch.num_points_per_instance
-        gt_npcs = data_batch.gt_npcs
+        instance_labels = data_batch.instance_labels #data_batch.instance_labels.shape   torch.Size([640000])
+        batch_indices = data_batch.batch_indices  #every point belonging to which batch
+        instance_sem_labels = data_batch.instance_sem_labels #torch.Size([32, 109])
+        num_points_per_instance = data_batch.num_points_per_instance #torch.Size([32, 109])
+        gt_npcs = data_batch.gt_npcs                                #torch.Size([640000, 3])
+        gt_sym=data_batch.gt_sym
         
         
         pt_xyz = points[:, :3]
         # cls_labels.to(pt_xyz.device)
 
+        #?这里的data_batch为point_clouds聚合得到
         pc_feature = self.forward_backbone(pc_batch=data_batch)
-
+        sym_preds=self.forward_symmetric(pc_feature)
+        # loss_sym=self.loss_symmetric(sym_preds,target_sym)
         # semantic segmentation
         sem_logits = self.forward_sem_seg(pc_feature)
         
@@ -514,10 +621,10 @@ class GAPartNet(lp.LightningModule):
             sem_labels=sem_labels,
             all_accu=all_accu,
             pixel_accu=pixel_accu,)
-        
+        #offsets_preds.shape     torch.Size([640000, 3])
         offsets_preds = self.forward_offset(pc_feature)
         if instance_regions is not None:
-            offsets_gt = instance_regions[:, :3] - pt_xyz
+            offsets_gt = instance_regions[:, :3] - pt_xyz  #instance_regions 0-3 mean 3-6min 6-9max
             loss_offset_dist, loss_offset_dir = self.loss_offset(
                 offsets_preds, offsets_gt, sem_labels, instance_labels, # type: ignore
             )
@@ -526,13 +633,15 @@ class GAPartNet(lp.LightningModule):
             loss_offset_dist, loss_offset_dir = 0., 0.
 
         if self.current_epoch >= self.start_clustering:
+            #voxel_tensor  SparseConvTensor[shape=torch.Size([56294, 16])]
+            #pc_voxel_id   torch.Size([304671])
             voxel_tensor, pc_voxel_id, proposals = self.proposal_clustering_and_revoxelize(
-                pt_xyz = pt_xyz,
-                batch_indices=batch_indices,
-                pt_features=pc_feature,
-                sem_preds=sem_preds,
-                offset_preds=offsets_preds,
-                instance_labels=instance_labels,
+                pt_xyz = pt_xyz,    #torch.Size([640000, 3])
+                batch_indices=batch_indices,  #torch.Size([640000])  tensor([ 0,  0,  0,  ..., 31, 31, 31]
+                pt_features=pc_feature,       #torch.Size([640000, 16])
+                sem_preds=sem_preds,          #torch.Size([640000])
+                offset_preds=offsets_preds,   #torch.Size([640000, 3])
+                instance_labels=instance_labels, #torch.Size([640000])
             )
             
             if sem_labels is not None and proposals is not None:
@@ -573,10 +682,21 @@ class GAPartNet(lp.LightningModule):
             npcs_logits = self.forward_proposal_npcs(
                 voxel_tensor, pc_voxel_id
             )
+            sym_npcs_logits = self.forward_proposal_npcs_sym(
+                voxel_tensor, pc_voxel_id
+            )
             if gt_npcs is not None:
+                # print(gt_npcs.shape)
+                # print(proposals.sorted_indices)
                 gt_npcs = gt_npcs[proposals.valid_mask][proposals.sorted_indices]
+                # print(gt_npcs.shape)
                 loss_prop_npcs = self.loss_proposal_npcs(npcs_logits, gt_npcs, proposals)
-                
+            
+            if gt_sym is not None:
+                gt_sym = gt_sym[proposals.valid_mask][proposals.sorted_indices]
+                # import pdb; pdb.set_trace()
+                loss_prop_sym = self.loss_proposal_sym(sym_npcs_logits, gt_sym, proposals)
+
                 # valid_mask = (sem_preds == sem_labels) & (gt_npcs != 0).any(dim=-1)
                 # proposals.npcs_valid_mask = valid_mask
             
@@ -593,16 +713,15 @@ class GAPartNet(lp.LightningModule):
             # proposals.npcs_preds = npcs_logits
             # npcs_map = torch.zeros_like(pt_xyz, device=pt_xyz.device)
             # npcs_map[instance_mask]
-                
-            
         else:
             npcs_preds = None
-            
+            loss_prop_sym=0.0
+            # loss_prop_npcs_sym =0.0
             loss_prop_npcs = 0.0
-        
+            
         # total loss
-        loss = loss_sem_seg + loss_offset_dist + loss_offset_dir + loss_prop_score + loss_prop_npcs
-
+        # loss = loss_sem_seg + loss_offset_dist + loss_offset_dir + loss_prop_score + loss_prop_npcs + loss_prop_npcs_sym
+        loss = loss_sem_seg + loss_offset_dist + loss_offset_dir + loss_prop_score + loss_prop_npcs +loss_prop_sym
 
         prefix = running_mode
         # losses
@@ -635,12 +754,28 @@ class GAPartNet(lp.LightningModule):
             batch_size=batch_size,
             on_epoch=True, prog_bar=False, logger=True, sync_dist=True
         )
+
+
         self.log(
             f"{prefix}_loss/loss_prop_npcs",
             loss_prop_npcs,
             batch_size=batch_size,
             on_epoch=True, prog_bar=False, logger=True, sync_dist=True
         )
+
+        self.log(
+            f"{prefix}_loss/loss_prop_sym",
+            loss_prop_sym,
+            batch_size=batch_size,
+            on_epoch=True, prog_bar=False, logger=True, sync_dist=True
+        )
+
+        # self.log(
+        #     f"{prefix}_loss/loss_prop_npcs_sym",
+        #     loss_prop_npcs_sym,
+        #     batch_size=batch_size,
+        #     on_epoch=True, prog_bar=False, logger=True, sync_dist=True
+        # )
         
         # evaulation metrics
         self.log(
@@ -835,21 +970,21 @@ class GAPartNet(lp.LightningModule):
         #     proposals = apply_nms(proposals, self.val_nms_iou_threshold)
         
         
-        proposals_ = Instances(
-            pt_xyz = proposals.pt_xyz,
-            score_preds=proposals.score_preds, 
-            pt_sem_classes=proposals.pt_sem_classes,
+        proposals_ = Instances(  
+            pt_xyz = proposals.pt_xyz,           #torch.Size([147900, 3])
+            score_preds=proposals.score_preds,   #torch.Size([179])
+            pt_sem_classes=proposals.pt_sem_classes, 
             batch_indices=proposals.batch_indices, 
             instance_sem_labels=proposals.instance_sem_labels,
             ious=proposals.ious, 
-            proposal_offsets=proposals.proposal_offsets, 
-            proposal_indices=proposals.proposal_indices, 
+            proposal_offsets=proposals.proposal_offsets,    #proposals.proposal_offsets.shape   torch.Size([180])
+            proposal_indices=proposals.proposal_indices,    #proposals.proposal_indices.shape   torch.Size([147900])
             valid_mask= proposals.valid_mask,
-            num_points_per_proposal=proposals.num_points_per_proposal,
-            num_points_per_instance=proposals.num_points_per_instance,
-            sorted_indices = proposals.sorted_indices,
-            npcs_preds=proposals.npcs_preds,
-            npcs_valid_mask=proposals.npcs_valid_mask,
+            num_points_per_proposal=proposals.num_points_per_proposal,   #torch.Size([179])
+            num_points_per_instance=proposals.num_points_per_instance,   #torch.Size([32, 110])
+            sorted_indices = proposals.sorted_indices,           #torch.Size([147900])
+            npcs_preds=proposals.npcs_preds,                     #torch.Size([147568, 3])
+            npcs_valid_mask=proposals.npcs_valid_mask,           #torch.Size([147900])
             
         )
         
